@@ -1,50 +1,56 @@
-name: Deploy to AWS
+name: Python Application CD
+
 on:
   push:
-    branches:
-      - "main"
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+ 
+
 env:
   AWS_REGION: eu-north-1
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  PRIVATE_SSH_KEY: ${{ secrets.AWS_SSH_KEY }}
-  SERVER_PUBLIC_IP: ${{ secrets.AWS_PUBLIC_KEY }}
-
+  ECR_REPOSITORY: aws-deploy
+  
 jobs:
-  deploy:
+  Deploy:
+    name: Deploy to EC2 using ECR
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
-      - name: Login to AWS ECR
+      - uses: actions/checkout@v2 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-      - name: Build, push docker image
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
         env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: aws-deploy
-          IMAGE_TAG: ${{ github.sha }}
-        run: |-
-          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
-          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
-      - name: Deploy docker image to EC2
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key && chmod 600 private_key
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$TAG
+
+      - name: Pull and Deploy from Amazon ECR to EC2
         env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          REPOSITORY: aws-deploy
-          IMAGE_TAG: ${{ github.sha }}
-          AWS_DEFAULT_REGION: eu-north-1
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ secrets.AWS_PUBLIC_KEY }}
-          username: ${{ secrets.USER_NAME }}
-          key: ${{ secrets.AWS_SSH_KEY }}
-          envs: AWS_SSH_KEY,REGISTRY,REPOSITORY,IMAGE_TAG,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,AWS_REGION
-          script: |-
-            sudo apt update
-            sudo apt install docker.io -y
-            sudo apt install awscli -y
-            sudo $(aws ecr get-login --no-include-email --region eu-north-1);
-            sudo docker stop myappcontainer || true
-            sudo docker rm myappcontainer || true
-            sudo docker pull $REGISTRY/$REPOSITORY:$IMAGE_TAG
-            sudo docker run -d -p 8080:80 $ECR_REGISTRY/$ECR_REPOSITORY:$TAG
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+          PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          HOSTNAME: ${{ secrets.SSH_HOST }}
+          USER_NAME: ${{ secrets.USER_NAME }}
+        run: |
+          echo "$PRIVATE_KEY" > private_key && chmod 600 private_key
+          echo "aws ecr get-login-password --region eu-north-1 | \
+          sudo docker login --username AWS --password-stdin $ECR_REGISTRY" > commands.txt
+          echo "sudo docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$TAG" > commands.txt 
+          echo "sudo docker stop \$(sudo docker container ls -q) &>> /dev/null" >> commands.txt
+          echo "sudo docker run -d -p 8080:80 $ECR_REGISTRY/$ECR_REPOSITORY:$TAG" >> commands.txt
+          cat commands.txt | ssh -o StrictHostKeyChecking=no -i private_key ${USER_NAME}@${HOSTNAME} 
