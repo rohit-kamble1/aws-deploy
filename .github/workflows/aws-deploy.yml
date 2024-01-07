@@ -25,8 +25,8 @@ jobs:
           REPOSITORY: aws-deploy
           IMAGE_TAG: ${{ github.sha }}
         run: |-
-            docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
-            docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          docker build -t $REGISTRY/$REPOSITORY:$IMAGE_TAG .
+          docker push $REGISTRY/$REPOSITORY:$IMAGE_TAG
       - name: Deploy docker image to EC2
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -35,16 +35,16 @@ jobs:
           AWS_DEFAULT_REGION: eu-north-1
         uses: appleboy/ssh-action@master
         with:
-            host: ${{ env.SERVER_PUBLIC_IP }}
-            username: ubuntu
-            key: ${{ env.PRIVATE_SSH_KEY }}
-            envs: PRIVATE_SSH_KEY,REGISTRY,REPOSITORY,IMAGE_TAG,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,AWS_REGION
-            script: |-
-              sudo apt update
-              sudo apt install docker.io -y
-              sudo apt install awscli -y
-              sudo $(aws ecr get-login --no-include-email --region ap-south-1);
-              sudo docker stop myappcontainer || true
-              sudo docker rm myappcontainer || true
-              sudo docker pull $REGISTRY/$REPOSITORY:$IMAGE_TAG
-              sudo docker run -d --name myappcontainer -p 80:80 $REGISTRY/$REPOSITORY:$IMAGE_TAG
+          host: ${{ secrets.AWS_PUBLIC_KEY }}
+          username: ${{ secrets.USER_NAME }}
+          key: ${{ secrets.AWS_SSH_KEY }}
+          envs: AWS_SSH_KEY,REGISTRY,REPOSITORY,IMAGE_TAG,AWS_ACCESS_KEY_ID,AWS_SECRET_ACCESS_KEY,AWS_DEFAULT_REGION,AWS_REGION
+          script: |-
+            sudo apt update
+            sudo apt install docker.io -y
+            sudo apt install awscli -y
+            sudo $(aws ecr get-login --no-include-email --region eu-north-1);
+            sudo docker stop myappcontainer || true
+            sudo docker rm myappcontainer || true
+            sudo docker pull $REGISTRY/$REPOSITORY:$IMAGE_TAG
+            sudo docker run -d --name myappcontainer -p 80:80 $REGISTRY/$REPOSITORY:$IMAGE_TAG
