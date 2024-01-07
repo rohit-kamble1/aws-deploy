@@ -43,8 +43,8 @@ jobs:
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           TAG: ${{ github.sha }}
-          PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          HOSTNAME: ${{ secrets.SSH_HOST }}
+          PRIVATE_KEY: ${{ secrets.AWS_SSH_KEY }}
+          HOSTNAME: ${{ secrets.AWS_PUBLIC_KEY }}
           USER_NAME: ${{ secrets.USER_NAME }}
         run: |
           echo "$PRIVATE_KEY" > private_key && chmod 600 private_key
