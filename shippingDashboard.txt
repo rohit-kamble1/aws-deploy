@@ -1,0 +1,627 @@
+"""
+Shipping Dashboard:
+                Sreamlit shipping dashboard is web based interactive dashboard 
+                primarly helps to monitor and visualise lineups and fixtures data. 
+                Along with it has sub pages which helps to validate layups, floating 
+                storage reports and update cofiguration files. The entire dashboard 
+                divided into different sub pages. 
+                
+                To access dashboard visit below link:
+                    http://flows-commodities.int.refinitiv.com:8501/                
+"""
+#import required dependencies
+import pandas as pd
+import numpy as np
+import sys
+sys.path.insert(0, r'\matlab\code\FreightModelling\freightServerTools\Python')
+import os
+os.chdir(r'\matlab\code\FreightModelling\freightServerTools\Python')
+from readmessagelog import readMessageLog 
+sys.path.insert(0, r'\matlab\code\FreightModelling\freightLocalTools\Python\emailingwithpython')
+os.chdir(r'\matlab\code\FreightModelling\freightLocalTools\Python\emailingwithpython')
+import outlookEmailFunctions as oef
+import datetime as dt
+from datetime import datetime, timezone, timedelta, date
+import re
+import warnings
+import streamlit as st
+from ismember import ismember
+#set streamlit page configuration
+st.set_page_config(page_title = "Shipping Dashboard", layout = "wide", page_icon = (":ship:")) #set webpage config
+warnings.filterwarnings("ignore")
+import cdb_pycomm_lib.cdbflowreader as flows
+from cdb_pycomm_lib import cdbreader
+import win32ui
+import time
+import plotly.express as px
+
+#convert date into requied date time format
+dateToday = datetime.now(timezone.utc).strftime("%d-%m-%Y %H:%M:%S %Z")
+
+#Check outlook is running
+def outlookIsRunning():    
+    try:
+        win32ui.FindWindow(None, 'Microsoft Outlook')
+        return True
+    except win32ui.error:
+        return False
+
+if outlookIsRunning()==False:  #outlook is not running then
+    os.startfile("outlook")    # start the outlook
+    time.sleep(120)            #and wait for 120 seconds to load the outlook completely.
+
+os.chdir(r"C:\matlab\data\ShpCheckReports\configFiles")
+flowSetNames = pd.read_csv("flowsetReports.csv")
+
+currentTimeLayupsFs = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+fromDateLayupsFs = datetime.now() - timedelta(days = 35)
+fromDate = datetime.today() - timedelta(days = 30) 
+
+# Using object notation
+#save different name of page in addSelectbox if one of the name selected from 
+#drop down menu, then only that part of code is triggered and show the results.
+addSelectbox = st.sidebar.selectbox(
+    "Select sub-page:",
+    ("Home","Update Configs","Lineups Messages", "View Lineups Count",  "View Fixtures Count", 
+     "Layups Report", "Floating Storage Report", 
+     "Other Links")
+)
+
+if addSelectbox == "Home":
+    st.header("Welcome to the Shipping Dashboard")
+
+if addSelectbox == "Lineups Messages":
+    st.write("Updated on: ", dateToday) #current date and time in UTC timezone
+
+    # Convert time to UTC(00:00)
+    def findUTCDelta(currentTime):
+        inISO =  currentTime.astimezone().isoformat(timespec='seconds')
+        extractDelta = re.search('[\+|-]\d\d:\d\d', inISO).group(0)
+        tzConvertDelta = re.split('(\+|-|:)', extractDelta)
+        tzConvertDelta = [tzConvertDelta[1],tzConvertDelta[2],tzConvertDelta[4]]
+     
+        if tzConvertDelta[0] == '+':
+            timeDelta = - dt.timedelta(hours= int(tzConvertDelta[1]), minutes = int(tzConvertDelta[2])) 
+        elif tzConvertDelta[0] == '-':
+            timeDelta = + dt.timedelta(hours= int(tzConvertDelta[1]), minutes = int(tzConvertDelta[2]))
+        return timeDelta
+
+
+    # Get the current time but move it back one hour to allow for any new emails to be processed
+    currentTime = datetime.now()
+    currentTime = datetime(currentTime.year, currentTime.month, currentTime.day, currentTime.hour, currentTime.minute)
+    currentTime = currentTime - dt.timedelta(hours=1)
+
+    # Convert the time from the system's timezone to UTC
+    deltaForUTC = findUTCDelta(currentTime)
+    currentTime = currentTime + deltaForUTC
+
+    curve_id = 142532952
+    lookbackPeriod = 15
+    dateFrom = currentTime - dt.timedelta(days=lookbackPeriod)
+    toCurveURL1 = '<a href="http://tcs-uad056.rft.refinitiv.com/py/AddtoCurves.py?value=';
+    toCurveURL2 = '&loadset=ShpWebCurves.deletions.text&curve_id=142532952" style="color:#FF0000;"target="_blank" onclick=''return confirm("Are you sure?")''>Resolve</a>';
+
+    # Read in the config file containing list of sources and the criteria for filtering emails
+    lineupConfig = pd.read_csv('C:\matlab\data\ShpLineups\Config\configForReport.csv')
+
+    # Only keep sources where both sender domain and email subject is filled
+    lineupConfig = lineupConfig.dropna()
+    lineupConfig.rename(columns = {'Message Name(case sensitive)' : 'msgName'}, inplace = True)
+    lineupConfig = lineupConfig.reset_index(drop=True)
+    ## Read in emails for all lineup sources
+
+    # Get the results dataframe ready
+    listOfDates = pd.date_range(dateFrom, periods=lookbackPeriod+1)
+    listOfDates = listOfDates.strftime('%d-%b-%Y')
+    emailDF = pd.DataFrame(columns = listOfDates)
+    emailDF['msgName'] = lineupConfig.msgName.drop_duplicates()
+    emailDF = emailDF.set_index('msgName')
+    emailDF = emailDF.fillna(value=False)
+    msgDF = emailDF.copy()
+    msgUrlDF =  pd.DataFrame('', columns=emailDF.columns, index=emailDF.index)
+
+    # Loop through the inbox for each source
+    # We are using i as the index and not msgName as msgName might contain duplicates
+    # if the same source has multiple subjects/domains. emailDF uses msgName as the
+    # index and is used to comapare to the messages later
+    for i in lineupConfig.index:
+        currentSource = lineupConfig.msgName[i]
+        subjectContains = '%' + lineupConfig.loc[i, 'Email Subject']
+        senderDomain = lineupConfig.loc[i, 'Email Sender Domain']
+        
+        anaMailBox = oef.getAFInbox()
+        mailList = oef.getAllMails(mailSubject = subjectContains, minSentDate = dateFrom, outlookFolder=anaMailBox,
+                                   maxSentDate = currentTime, senderAddress = senderDomain)
+
+        # Convert the lineup emails into a dataframe with source and date
+        savedDate = []
+        for mailItem in mailList:
+            # Convert the time from the system's timezone to UTC
+            mailDate = mailItem.senton + deltaForUTC
+            savedDate.append(mailDate.strftime('%d-%b-%Y'))
+            if bool(savedDate):
+                emailDF.loc[currentSource] = np.in1d(emailDF.loc[[currentSource]].columns, savedDate)
+    
+    ## Read in the message log to find which sources had a message
+    msgLog = readMessageLog.readMessageLog(runFromDate = dateFrom, runToDate = currentTime, message_type_id = 'SGSFlowData',  parameter_contains = 'STFLineup')
+
+    # Extract the source message name and date from each log row
+    allParameters = msgLog.PARAMETERS.astype(str)
+    msgName = allParameters.str.extract('<loadset_name>(.+?)</loadset_name>')
+    msgURL = allParameters.str.extract('<messageurl>(.+?)</messageurl>')
+    msgURL = '<a href="' + msgURL + '"style="color:#696969;"target="_blank">#</a>'
+    lineupsFromMsgs = pd.concat([msgName, msgLog.LOG_TIME_STAMP, msgURL], axis=1)
+    lineupsFromMsgs.columns = ['msgName', 'timestamp', 'msgURL']
+    lineupsFromMsgs = lineupsFromMsgs.set_index('msgName')
+    lineupsFromMsgs.timestamp = lineupsFromMsgs.timestamp.dt.strftime('%d-%b-%Y')
+    # Group the rows according to the source and date and then join the URLs for each row
+    lineupsFromMsgs = lineupsFromMsgs.groupby(['msgName', 'timestamp'])['msgURL'].apply(' '.join).reset_index().set_index('msgName')
+
+    for currentSource in msgDF.index:
+        if currentSource in lineupsFromMsgs.index:
+            datesForCurrentSource = lineupsFromMsgs['timestamp'].loc[[currentSource]].tolist()
+            urlsForCurrentSource = lineupsFromMsgs['msgURL'].loc[[currentSource]].tolist()
+            
+            # Mark dates that have a message
+            msgDF.loc[currentSource] = np.in1d(msgDF.loc[[currentSource]].columns, datesForCurrentSource)
+            
+            # Store URLs for the messages
+            msgUrlDF.loc[currentSource][datesForCurrentSource] = urlsForCurrentSource
+    
+        
+    # Check which emails have a message
+    ixMissingMsg = (emailDF == True) & (msgDF == False)
+    ixMissingMsg.index.names = ['Sources Tracked']
+
+    # Change to False the ones that have been verified and fixed by reading mannual inputs from the curve
+    fixedManually = cdbreader.get_curves(curve_id, db = 'prod', value_type = 'text')
+    ixOnePipe = fixedManually['V'].str.count('\|') == 1
+    deletionsDF = fixedManually[['V']].loc[ixOnePipe]
+    deletionsDF['V'] = deletionsDF['V'].str.split('\|')
+    if len(deletionsDF) > 0:
+        deletionsDF[['source','date']] = pd.DataFrame(deletionsDF['V'].tolist(), index = deletionsDF.index)
+        for delSource in ixMissingMsg.index:
+            allDates = deletionsDF[deletionsDF['source'] == delSource]['date']
+            ixDelete = np.in1d(ixMissingMsg.loc[delSource].index, allDates)
+            ixMissingMsg.loc[delSource][ixDelete==True] = False
+
+    # Replace 'True' with a link which will mark them as resolved by adding the message name
+    # and the date to a curve
+    urlDF = ixMissingMsg.copy()
+    for currentSource in urlDF.index:
+        urlDF.loc[currentSource] = toCurveURL1 + currentSource + '|' + urlDF.loc[currentSource].index + toCurveURL2
+    
+    ixMissed = ixMissingMsg == True
+    ixMissingMsg = ixMissingMsg.where(msgDF == False, other = msgUrlDF)
+    ixMissingMsg = ixMissingMsg.where(ixMissed == False, other = urlDF)
+    ixMissingMsg = ixMissingMsg.replace(to_replace=False, value='')
+    
+    #Add header
+    st.header("checkLineupLoad Dashboard") 
+    #Add markdown          
+    st.markdown("Loads message URLs from APEX and compares against mails in analyst_freight")
+    #add url on webpage
+    url = '[APEX 500](http://apex.commodities.int.thomsonreuters.com/ords/prod/f?p=500)'
+    st.markdown(url, unsafe_allow_html = True) 
+    #convert to html 
+    df = ixMissingMsg.to_html(bold_rows = False, render_links = True, justify = 'center', col_space='70px', index_names=False, escape = False)
+    #create streamlit dashboard
+    st.write(df, unsafe_allow_html = True)    
+         
+#This page helps to view lineups count with respect to sources.
+if addSelectbox == "View Lineups Count":
+    names = flowSetNames['flowset'].tolist()
+    displayName = flowSetNames['display flowset name'].tolist()
+    st.write("Updated on: ", dateToday) #current date and time in UTC timezone
+    #Create lineupsTable
+    numberOfDays = 10
+    #fetch data using get_vessel_flow query from CDB
+    def getFlowsData():
+        #retrive flows data using flowset and store into df dataframe
+        df = flows.get_vessel_flow(from_date   = fromDate.date(),
+                                flow_set_names = flowSetNames['flowset'].tolist())
+        return df
+    df = getFlowsData()
+    #create varibale aosData and store BalticsAOS data from dataframe
+    aosData = df[df['FLOW_SET_NAME']== 'Lineups.BalticAOS'] 
+    portsList = np.array(['Agioi Theodoroi','Alexandria','Aliaga','Augusta','Azov','Batumi','Ceyhan',
+                 'Constanta - Oil Terminal Berths 69 - 79', 'Dakar','Diliskelesi','Dilovasi',
+                 'Durres','Feodosia','Gibraltar','Giurgiulesti', 'Iskenderun','Jeddah',
+                 'Kavkaz','Koper','Kulevi Oil Terminal','Las Palmas','Le Havre','Lome'
+                 'Lukoil Burgas-Rosenets Oil Terminal', 'Mersin','Midia',
+                 'Mikon Berth No 15 (Nikolayev)','Novorossiysk', 'Perama','Poti',
+                 'Rostov on Don','Samsun', 'Taganrog','Taman','Tartous','Thessaloniki',
+                 'Trabzon','Trieste','Tuapse', 'Turkmenbashi','Valletta','Venice','Volgograd'])
+    portsList = np.transpose(portsList).reshape(-1, 1)
+    blackSeaIdx = (ismember(aosData.FRE_LOAD_POINT_NAME,portsList) or ismember(aosData.FRE_DISCH_POINT_NAME,portsList))[0]
+    aosData.FLOW_SET_NAME[blackSeaIdx == True] = 'Lineups.BlackSea AOS'
+    df[df['FLOW_SET_NAME'] == 'Lineups.BalticAOS'] = aosData
+    #HTML output
+    results = "" #create empty string
+    def createLineupsTable(df,  numberOfDays):
+        today = datetime.today()
+        #iterate over today's date to past 30 days date.
+        days = [today.date() - dt.timedelta(days = i) for i in range(numberOfDays, -1, -1)]
+        sources = np.unique(df.FLOW_SET_NAME) # take unique sources name from df.FLOW_SET_NAME column
+        #iterate over sources and validate if source name contain string 'Lineups'
+        sources = [s for s in sources if re.search('Lineups', s)] 
+        #check source name from column FLOW_SET_NAME, is member of sources.
+        df = df[ismember(df.FLOW_SET_NAME, sources)[0]]
+        #shift each date from FLOW_CREATED_DATE to the start of the day by replacing
+        #hour, minute and second to the intial value i.e. zero
+        upd = []
+        for i in range(len(df)):
+            ad = df['FLOW_CREATED_DATE'][i]
+            ad = ad.replace(hour=0, minute=0, second=0)
+            upd.append(ad)
+        upd = np.array(upd)
+        #create sparse matrix
+        #count = np.zeros([len(sources), numberOfDays+1])
+        count = np.zeros([len(names), numberOfDays + 1])
+        badVal = '#3888d'
+        goodVal = '9cd62f'
+        greyVal = '#b7b9b9'
+        #create table and set font size and font
+        results = '<table><font size="2" face="calibri">'
+        results += '<tr><th>Source</th>' 
+        #iterate over all the column from a count sparse matrix also iterate over length of source
+
+        for i in range(len(count[0,:])):
+            for j in range(len(names)):
+                if len(df[df['FLOW_SET_NAME'] == names[j]]) > 0:
+                    #check source name is part of column 'FLOW_SET_NAME'
+                    setNameMatch = df['FLOW_SET_NAME']==(names[j])
+                    #shift today's date backword by numberOfDays+i
+                    updShifted = datetime.today() - dt.timedelta(days = numberOfDays - i)
+                    #check any date from upd matches with updShifted date
+                    setDateMatch = upd==updShifted.replace(hour=0, minute=0, second=0, microsecond=0)
+                    count[j, i] = np.sum(setDateMatch & setNameMatch)
+                else:
+                    count[j, i] = 0
+        count = count.astype(dtype = 'int')
+        names.append('Total') # add new row in table at the end of source column
+        count = np.vstack([count, np.sum(count, axis=0)]) # vertical sum of all value present in a column 
+        #iterate over thd days and change the date format.
+        for i in range(len(days)):
+            results += '<th>{}</th>'.format(days[i].strftime('%a %d-%m'))
+        results += '</td></tr>'
+        
+        #iterate over the length of sources and length of row of count sparse matrix.
+        #if found value greater than zero at any position in count matrix then assign as good value color.
+        #otherwise assign bad value color.
+        #if there is saturday and sunday then assign them as grey value.
+        #Assign grey value for source name.
+        displayName.append('Total')
+        for j in range(len(names)):
+            results += '<tr><td>{}</td>'.format(displayName[j])
+            for i in range(len(count[0,:])):
+                if j == len(names):
+                    color = greyVal
+                elif datetime.weekday(days[i])==5 or datetime.weekday(days[i])==6:
+                    color = greyVal
+                elif count[j,i] > 0:
+                    color = goodVal
+                else:
+                    color = badVal
+                if j == len(names):
+                    results += '<td bgcolor = "{}"><b>{}</b></td>'.format(color, count[j,i])
+                else:
+                    results += '<td bgcolor = "{}">{}</td>'.format(color, count[j,i])
+            results += '</tr>'
+        results += '<font></table>' 
+        return results
+
+    results += createLineupsTable(df, numberOfDays=10) 
+    
+    #Add header 
+    st.header("Lineups Table") 
+    #add jira link                       
+    url = '[Raise jira ticket](https://jira.refinitiv.com/secure/RapidBoard.jspa?rapidView=18175)' 
+    st.markdown(url, unsafe_allow_html = True)
+    st.markdown("All lineups records by create date and source")
+    #create dashboard
+    st.write(results, unsafe_allow_html = True)       
+#This page helps to visualise the count of processed fixture weekly, monthly and yearly,
+#with the help of tables and charts.
+if addSelectbox == "View Fixtures Count": 
+    st.write("Updated on: ", dateToday)
+
+    #fixture Dashboard
+    def getFixtureData():    #get fixture data
+        laycanFrom = datetime.today() - dt.timedelta(120)  #set laycan date 
+        df = flows.get_vessel_fixture(laycan_from_date = laycanFrom) #retrive data
+        return df
+    
+
+    def createTable(cleanDirty, data, numberOfDays):
+        today = datetime.today()
+        #iterate over today's date to past 30 days date.
+        
+        days = [today.date() - dt.timedelta(days = i) for i in range(numberOfDays, -1, -1)]
+        
+        sources = np.unique(df.DATA_SOURCE)            #identify unique source
+        sources = np.delete(sources, [1,3])            #Remove bassoe and frontier source
+        count = np.zeros([len(sources), numberOfDays + 1]) #create sparse matrix
+        badVal = '#3888d'                              
+        goodVal = '9cd62f'
+        greyVal = '#b7b9b9'
+        
+        resultsFixture = '<table><font size="2" face="calibri">' #define table font and font size
+        resultsFixture += '<tr><th>Source</th>' 
+        
+        #identify index of date for day is sunday
+        index = []
+        for i in range(len(days)):
+            if datetime.weekday(days[i]) == 6:
+                index.append(i)
+        
+        for i in range(len(count[0,:])):  #Iterate over length of matrix count
+            for j in range(len(sources)): #iterate over length of sources
+                if cleanDirty == None:
+                    setDateMatch = df.UPDATED_ON == ((datetime.today().replace(hour=0, minute =0, second= 0, microsecond = 0))-dt.timedelta(numberOfDays - i))
+                    setNameMatch = df.DATA_SOURCE == sources[j]
+                    count[j, i] = sum(setNameMatch & setDateMatch) #addition of two array
+                else:
+                    setDateMatch = df.UPDATED_ON == datetime.today().replace(hour=0, minute =0, second= 0, microsecond = 0)-dt.timedelta(numberOfDays - i)
+                    setNameMatch = df.DATA_SOURCE == sources[j]
+                    setTypeMatch = df.CLEAN_DIRTY == cleanDirty
+                    count[j, i] = np.sum(setNameMatch & setDateMatch & setTypeMatch) #addition of three array
+        
+        count = np.delete(count, index, axis = 1)
+        count = count.astype(dtype = 'int')
+       
+        sources = np.append(sources, 'Total (NOT TR)')     #append element in sources array
+        count = np.vstack([count, np.sum(count, axis=0)])  # vertical sum of count of fixture            
+        htotal = np.sum(count, axis = 1)
+        
+        #Exclude sunday from days
+        workdays = []
+        for i in range(len(days)):
+            if datetime.weekday(days[i]) != 6:
+                workdays.append(days[i])
+        
+        idx = []
+        if numberOfDays == 30:
+            for i in range(len(workdays)):
+                if (workdays[i] == datetime.today().replace(day =1).date()) or (workdays[i] == datetime.today().replace(day = 2).date()):
+                    idx.append(i)
+                    
+            nCount = count[:, idx[0]:]
+            nTotal = np.sum(nCount, axis =1 )
+        
+        
+        for i in range(len(workdays)):  #create table and assign date on first row
+            resultsFixture += '<td>{}</td>'.format(workdays[i].strftime('%a %d-%m'))
+        resultsFixture += '<td>Total</td>'
+        
+        if numberOfDays == 30:
+            resultsFixture += '<td>Month To Date Total</td>'
+
+        resultsFixture += '</td></tr>'
+        
+        #iterate over length of sources array and according to condition
+        #categories into good value, bad value and grey value. The grey value 
+        #assigned for weekend only.
+        for j in range(len(sources)):
+            resultsFixture += '<tr><td>{}</td>'.format(sources[j])
+            for i in range(len(count[0,:])):
+                if j == len(sources):
+                    color = greyVal
+                elif datetime.weekday(workdays[i])==5:
+                    color = greyVal
+                elif count[j,i] > 0:
+                    color = goodVal
+                else:
+                    color = badVal
+                if j == len(sources):
+                    resultsFixture += '<td bgcolor = "{}"><b>{}</b></td>'.format(color, count[j,i])
+                else:
+                    resultsFixture += '<td bgcolor = "{}">{}</td>'.format(color, count[j,i])
+            resultsFixture += '<td>{}</td>'.format(htotal[j])
+            if numberOfDays == 30:
+                resultsFixture += '<td>{}</td>'.format(nTotal[j])
+                
+            resultsFixture += '</tr>'
+                        
+        resultsFixture += '<font></table>'
+        return resultsFixture
+        
+    url = '[Raise jira ticket](https://jira.refinitiv.com/secure/RapidBoard.jspa?rapidView=18175)' #add jira link
+    st.markdown(url, unsafe_allow_html = True)
+    #for weekly fixture data
+    if st.button('Last Week Fixture Count'):
+        df = getFixtureData()   #get fixture data of last 100 days.
+        resultsFixture = " "
+        
+        resultsFixture += '<br><font size="6" face="calibri"><b>All last week fixtures data by date and source</b><br><br>'
+        resultsFixture += createTable(cleanDirty = None, data = df, numberOfDays = 6)      #if commodity type is NONE
+        resultsFixture += '<br><font size="4" face="calibri"><b>All clean fixtures data by update date and source</b><br><br>'
+        resultsFixture += createTable(cleanDirty = 'Clean', data = df, numberOfDays = 6) #if commodity type is 'Clean'
+        resultsFixture += '<br><font size="4" face="calibri"><b>All dirty fixtures data by update date and source</b><br><br>'
+        resultsFixture += createTable(cleanDirty = 'Dirty', data = df, numberOfDays = 6) #if commodity type is 'Dirty'
+        resultsFixture = resultsFixture.replace('RSPLATOU', 'AFFINITY')   #Replace old fixture name with new fixture name
+        resultsFixture = resultsFixture.replace('ICAP', 'HRP')            #Replace old fixture name with new fixture name
+        st.write(resultsFixture, unsafe_allow_html = True) #create dashboard
+    #for month to date fixture data
+    if st.button('Month To Date Fixture Count'):
+        df = getFixtureData()   #get fixture data of last 100 days.
+        resultsFixture = " "
+        
+        resultsFixture += '<br><font size="6" face="calibri"><b>All last month fixtures data by date and source</b><br><br>'
+        resultsFixture += createTable(cleanDirty = None, data = df, numberOfDays= 30)      #if commodity type is NONE
+        resultsFixture += '<br><font size="4" face="calibri"><b>All clean fixtures data by update date and source</b><br><br>'
+        resultsFixture += createTable(cleanDirty = 'Clean', data = df, numberOfDays = 30) #if commodity type is 'Clean'
+        resultsFixture += '<br><font size="4" face="calibri"><b>All dirty fixtures data by update date and source</b><br><br>'
+        resultsFixture += createTable(cleanDirty = 'Dirty', data = df, numberOfDays = 30) #if commodity type is 'Dirty'
+        resultsFixture = resultsFixture.replace('RSPLATOU', 'AFFINITY')   #Replace old fixture name with new fixture name
+        resultsFixture = resultsFixture.replace('ICAP', 'HRP')            #Replace old fixture name with new fixture name
+        st.write(resultsFixture, unsafe_allow_html = True) #create dashboard
+    #for year to date fixture data
+    if st.button("Year To Date Fixture Count"):
+        df = flows.get_vessel_fixture(laycan_from_date = date.today() - timedelta(days = 365))
+        df['UPDATED_ON'] = pd.to_datetime(df['UPDATED_ON'], format = '%Y-%m-%d')
+        
+        df['monthOfDate'] = df['UPDATED_ON'].dt.month
+        df['year'] = df["UPDATED_ON"].dt.year
+        
+        currentYear = date.today().year
+        df = df[df['year'] == currentYear]
+
+        sources = pd.unique(df.DATA_SOURCE)
+
+        finalDf = pd.DataFrame()
+        
+        finalDf["Sources"] = sources
+        finalDf[['January', 'February', 'March', 'April', 'May', 'Jun', 'July', 
+                 'August', 'September', 'October', 'November', 'December']] = ''
+
+        for i in range(len(sources)):
+            for j in range(1, 13):
+                dfNew = df[df["DATA_SOURCE"] == sources[i]]
+                dataCount = len(dfNew[dfNew['monthOfDate'] == j])
+                finalDf.iloc[i, j] = dataCount
+                
+        finalDf['Total'] = finalDf.iloc[:, 1:].sum(axis = 1)
+        finalDf = finalDf.loc[:, (finalDf !=0).any(axis = 0)]
+        finalDf.index = np.arange(1, len(finalDf)+1)
+        
+        st.header("Year To Date Fixture Count")
+        results = finalDf.to_html()
+        st.write(results, unsafe_allow_html = True)
+        
+        #create plotly chart for year to date data to visualise entire year data 
+        #trend.
+        
+        chartData = finalDf.set_index('Sources')
+        chartData = chartData.drop('Total', axis = 1)
+        chartData = chartData.T
+        fig = px.line(chartData, labels={"index":"Month", "value":"Fixture Count"},
+                      title = 'Year To Date Trend of Processed Fixtures Count')
+        fig.update_layout(font_family = "Courier New",
+                          font_color = "black",
+                          title_font_family = "Courier New",
+                          title_font_color = "black",
+                          legend_title_font_color = "black",
+            )
+        
+        st.plotly_chart(fig)
+        
+#show tablular data which helps to validate daily and weekly report.
+if addSelectbox == "Layups Report":
+    st.write('Report Time: '+ currentTimeLayupsFs +' IST')
+
+    #layups and floating storage.
+    flowsDataLayups = flows.get_vessel_flow(from_date = fromDateLayupsFs.date(), flow_set_names = ['Global.Layups'])
+    flowsDataLayups.drop(flowsDataLayups.index[flowsDataLayups['FLOW_ADMIN_STATUS'] == 'Obsolete'], inplace = True)
+    flowsDataLayups.drop(flowsDataLayups.index[~flowsDataLayups['FRE_COMMENTS'].str.contains('Potential', na=False)], inplace = True)
+    flowsDataLayups.drop(['FLOW_SET_NAME','FRE_COMMENTS','FLOW_ADMIN_STATUS','FRE_ARR_DATE_FROM'], axis=1, inplace=True)
+    if len(flowsDataLayups) == 0:
+        print("No potential layups vessel found.")
+    else:
+        imoListLayups = list(flowsDataLayups.IMO)
+        vesselDataLayups = flows.get_vessel_characteristics(imo_list= imoListLayups)
+        imoRicDictLayups = dict(zip(vesselDataLayups.IMO, vesselDataLayups.RIC))
+        flowsDataLayups['RIC'] = flowsDataLayups['IMO'].map(lambda x:imoRicDictLayups[x] if x in imoRicDictLayups else "")
+        flowsDataLayups = flowsDataLayups.drop(flowsDataLayups.iloc[:, 2:5], axis = 1)
+        flowsDataLayups = flowsDataLayups.drop(flowsDataLayups.iloc[:, 3:21], axis = 1)
+        flowsDataLayups = flowsDataLayups.drop(flowsDataLayups.iloc[:, 4:23], axis = 1)
+        flowsDataLayups = flowsDataLayups.drop(flowsDataLayups.iloc[:, 5:-1], axis = 1)
+        uniqueRIC = np.unique(flowsDataLayups['RIC'])
+        ricList = "_".join([str(x) for x in uniqueRIC])
+        ricList = ricList.replace("}", "%7D")
+        flowsDataLayups = flowsDataLayups.to_html(index = False)
+        
+        st.header('Global.Layups Report - Potential')
+        url = '[Click here to see vessels in the current list in the interactive map 2.0](reuters://REALTIME/verb=Eikon%20Explorer%20App/url=cpurl://apps.cp./Apps/iMap?zoom=3&lat=0long=0&List%2F0_assetConfigurations='+str(ricList)+')'
+        st.markdown(url, unsafe_allow_html = True)
+        st.write(flowsDataLayups, unsafe_allow_html = True)
+
+#show tablular data which helps to validate daily and weekly report.
+if addSelectbox == "Floating Storage Report":
+    st.write('Report Time: '+ currentTimeLayupsFs +' IST')
+    
+    flowsDataFS = flows.get_vessel_flow(from_date = fromDateLayupsFs.date(), flow_set_names = ['Global.FloatingStorage'])
+    flowsDataFS.drop(flowsDataFS.index[flowsDataFS['FLOW_ADMIN_STATUS'] == 'Obsolete'], inplace = True)
+    flowsDataFS.drop(flowsDataFS.index[~flowsDataFS['FRE_COMMENTS'].str.contains('Potential', na=False)], inplace = True)
+    flowsDataFS.drop(['FLOW_SET_NAME','FRE_COMMENTS','FLOW_ADMIN_STATUS','FRE_ARR_DATE_FROM'], axis=1, inplace=True)
+    if len(flowsDataFS) == 0:
+        print("No floating storage vessel found.")
+    else:
+        imoListFS = list(flowsDataFS.IMO)   
+        vesselDataFS = flows.get_vessel_characteristics(imo_list= imoListFS)
+        
+        imoRicDictFS = dict(zip(vesselDataFS.IMO, vesselDataFS.RIC))
+        flowsDataFS['RIC'] = flowsDataFS['IMO'].map(lambda x:imoRicDictFS[x] if x in imoRicDictFS else "")
+        
+        flowsDataFS = flowsDataFS.drop(flowsDataFS.iloc[:, 2:5], axis = 1)
+        flowsDataFS = flowsDataFS.drop(flowsDataFS.iloc[:, 3:21], axis = 1)    
+        flowsDataFS = flowsDataFS.drop(flowsDataFS.iloc[:, 4:22], axis = 1)    
+        flowsDataFS = flowsDataFS.drop(flowsDataFS.iloc[:, 6:-1], axis = 1)    
+        flowsDataFSVLCC =flowsDataFS[flowsDataFS['FRE_VES_TYPE'] == 'VLCC']
+        flowsDataFSSuez =flowsDataFS[flowsDataFS['FRE_VES_TYPE'] == 'Suezmax']
+        flowsDataFSAfra =flowsDataFS[flowsDataFS['FRE_VES_TYPE'] == 'Aframax / LRII']
+        flowsDataFSMed =flowsDataFS[flowsDataFS['FRE_VES_TYPE'] == 'Medium']
+        
+        st.header('Global.Floating Storage Report - Potential')
+        uniqueRICFSVLCC = np.unique(flowsDataFSVLCC['RIC'])
+        ricListFS = "_".join([str(x) for x in uniqueRICFSVLCC])
+        ricListFS = ricListFS.replace("}", "%7D")
+        flowsDataFSVLCC = flowsDataFSVLCC.to_html(index = False)
+        url = '[Click here to see vessels in the current list in the interactive map 2.0](reuters://REALTIME/verb=Eikon%20Explorer%20App/url=cpurl://apps.cp./Apps/iMap?zoom=3&lat=0long=0&List%2F0_assetConfigurations='+str(ricListFS)+')'
+        st.markdown(url, unsafe_allow_html = True)
+        st.header('VLCC Report - Potential')
+        st.write(flowsDataFSVLCC, unsafe_allow_html = True)
+        st.write(" ")
+        
+        st.header('Suezmax Report - Potential')
+        uniqueRICFSSuez = np.unique(flowsDataFSSuez['RIC'])
+        ricListFS = "_".join([str(x) for x in uniqueRICFSSuez])
+        ricListFS = ricListFS.replace("}", "%7D")
+        flowsDataFSSuez = flowsDataFSSuez.to_html(index = False)
+        url = '[Click here to see vessels in the current list in the interactive map 2.0](reuters://REALTIME/verb=Eikon%20Explorer%20App/url=cpurl://apps.cp./Apps/iMap?zoom=3&lat=0long=0&List%2F0_assetConfigurations='+str(ricListFS)+')'
+        st.markdown(url, unsafe_allow_html = True)
+        st.write(flowsDataFSSuez, unsafe_allow_html = True)
+        st.write(" ")
+        
+        st.header('Aframax Report - Potential')
+        uniqueRICFSAfra = np.unique(flowsDataFSAfra['RIC'])
+        ricListFS = "_".join([str(x) for x in uniqueRICFSAfra])
+        ricListFS = ricListFS.replace("}", "%7D")
+        flowsDataFSAfra = flowsDataFSAfra.to_html(index = False)
+        url = '[Click here to see vessels in the current list in the interactive map 2.0](reuters://REALTIME/verb=Eikon%20Explorer%20App/url=cpurl://apps.cp./Apps/iMap?zoom=3&lat=0long=0&List%2F0_assetConfigurations='+str(ricListFS)+')'
+        st.markdown(url, unsafe_allow_html = True)
+        st.write(flowsDataFSAfra, unsafe_allow_html = True)
+        st.write(" ")
+        
+        st.header('Medium Report - Potential')
+        uniqueRICFSMed = np.unique(flowsDataFSMed['RIC'])
+        ricListFS = "_".join([str(x) for x in uniqueRICFSMed])
+        ricListFS = ricListFS.replace("}", "%7D")
+        flowsDataFSMed = flowsDataFSMed.to_html(index = False)
+        url = '[Click here to see vessels in the current list in the interactive map 2.0](reuters://REALTIME/verb=Eikon%20Explorer%20App/url=cpurl://apps.cp./Apps/iMap?zoom=3&lat=0long=0&List%2F0_assetConfigurations='+str(ricListFS)+')'
+        st.markdown(url, unsafe_allow_html = True)
+        st.write(flowsDataFSMed, unsafe_allow_html = True)
+
+if addSelectbox == "Other Links":
+    st.write("Updated on: ", dateToday)
+    st.header("All other links")   #add header
+    url = '[confluence](https://confluence.refinitiv.com/display/SHIPPING/Scheduled+Processes)'
+    fixtureUrl = '[Daily Errors](https://lsegroup.sharepoint.com/teams/OilandShippingResearch/Shared%20Documents/Forms/AllItems.aspx?RootFolder=%2Fteams%2FOilandShippingResearch%2FShared%20Documents%2FShipping%20Reports&FolderCTID=0x012000B489DC66F412804EB6BE39337CCF53D6)' 
+    apexUrl = '[APEX 2100](http://apex.commodities.int.thomsonreuters.com/ords/prod/f?p=2100)'
+    st.markdown(url, unsafe_allow_html = True)
+    st.markdown(fixtureUrl, unsafe_allow_html = True)
+    st.markdown(apexUrl, unsafe_allow_html = True)
+
+#this helps to update config files
+if addSelectbox == "Update Configs":
+    st.header('Update configuration files under Flows/Config and ShpLineups/Config')
+    if st.button('Regenerate berth depth and update all config files'):
+        os.chdir(r'C:\matlab\code\ShpTools\Scripts')
+        os.startfile("BerthDepthAndConfig.bat")
+        st.write("Configs Updated Successfully!")
+    if st.button('Update all config files'):
+        os.chdir(r'C:\matlab\code\ShpTools\Scripts')
+        os.startfile("UpdateConfigFiles.bat")
+        st.write("Configs Updated Successfully!")
+        
